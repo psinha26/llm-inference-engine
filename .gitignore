@@ -5,3 +5,5 @@ __pycache__/
 *.bin
 !tests/data/*.bin
 bench/results/*.cache.json
+.DS_Store
+.vscode/
