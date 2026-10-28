@@ -48,17 +48,26 @@ def hf_reference(model_dir: Path):
         z = np.load(cache, allow_pickle=True)
         return list(z["prompt_ids"]), list(z["logits"]), list(z["greedy"])
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from tokenizers import Tokenizer
+    from transformers import AutoModelForCausalLM
 
-    tok = AutoTokenizer.from_pretrained(model_dir)
+    # Tokenize with the `tokenizers` library straight from tokenizer.json (AutoTokenizer would need
+    # tokenizer_config.json, and guessing its class can silently add a BOS token).
+    tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
     model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float32).eval()
     prompt_ids, logits, greedy = [], [], []
     with torch.no_grad():
         for i, p in enumerate(PROMPTS):
-            ids = tok(p, return_tensors="pt").input_ids
-            out = model(ids).logits[0, -1].numpy()
-            gen = model.generate(ids, max_new_tokens=N_GEN, do_sample=False, min_new_tokens=N_GEN,
-                                 pad_token_id=tok.eos_token_id)[0].tolist()
+            ids = torch.tensor([tok.encode(p).ids])
+            res = model(ids, use_cache=True)
+            out = res.logits[0, -1].numpy()
+            # Plain greedy loop with HF's KV cache (no generate() heuristics; end-of-text allowed).
+            gen, past, logit = ids[0].tolist(), res.past_key_values, res.logits[0, -1]
+            for _ in range(N_GEN):
+                nxt = int(logit.argmax())
+                gen.append(nxt)
+                res = model(torch.tensor([[nxt]]), past_key_values=past, use_cache=True)
+                past, logit = res.past_key_values, res.logits[0, -1]
             prompt_ids.append(ids[0].tolist())
             logits.append(out)
             greedy.append(gen)

@@ -25,6 +25,8 @@ public:
     int vocab_size() const { return int(id_to_token_.size()); }
     int bos_id() const { return bos_id_; }
     int eos_id() const { return eos_id_; }
+    // End-of-text or end-of-turn (chat models end replies with e.g. <|im_end|>).
+    bool is_stop(int id) const { return id == eos_id_ || id == eot_id_; }
 
 private:
     struct AddedToken {
@@ -42,7 +44,7 @@ private:
     bool split_digits_ = false;  // Digits pre-tokenizer with individual_digits
     bool use_regex_ = true;      // ByteLevel pre-tokenizer applies the GPT-2 regex
     bool add_prefix_space_ = false;
-    int bos_id_ = -1, eos_id_ = -1;
+    int bos_id_ = -1, eos_id_ = -1, eot_id_ = -1;
 
     std::string byte_to_char_[256];                     // byte -> UTF-8 of its byte-level char
     std::unordered_map<uint32_t, uint8_t> char_to_byte_;

@@ -18,7 +18,15 @@ Output layout (little-endian), see src/model/format.h for the C++ side:
     final_norm [dim]
     lm_head [vocab, dim]   (omitted when embeddings are tied)
 
-Usage: python3 scripts/convert.py <hf_model_dir> <out.bin>
+With --layout tiled, every weight matrix is stored in 4-row tiles (rows zero-padded to a multiple
+of 4; see src/ops/kernels.h) and header flag bit 3 is set. fp32 tiles are 4 rows x 8 values; int8
+values are 4 rows x 32 per block and their scales are 4 per block.
+
+With --quant int8, every weight matrix (embeddings, projections, LM head) is stored instead as
+    int8 values [rows, cols], then fp32 scales [rows, cols/32]   (each part 64-byte aligned)
+and header flag bit 2 is set. Norms and biases stay fp32.
+
+Usage: python3 scripts/convert.py <hf_model_dir> <out.bin> [--quant int8] [--layout tiled]
 """
 import json
 import mmap
@@ -35,6 +43,36 @@ ALIGN = 64
 
 FLAG_TIED = 1 << 0
 FLAG_QKV_BIAS = 1 << 1
+FLAG_Q8 = 1 << 2
+FLAG_TILED = 1 << 3
+TILE_ROWS, TILE_COLS_F32 = 4, 8
+Q8_BLOCK = 32
+
+# Tensors stored as int8 blocks in --quant int8 files (norms and biases stay fp32).
+MATRIX_SUFFIXES = ("embed_tokens.weight", "proj.weight", "lm_head.weight")
+
+
+def quantize_q8(w):
+    """Block-wise symmetric int8: every 32 consecutive values share one fp32 scale d = max|w| / 127."""
+    rows, cols = w.shape
+    if cols % Q8_BLOCK:
+        sys.exit(f"int8 needs the column count to be a multiple of {Q8_BLOCK}, got {cols}")
+    blocks = w.reshape(rows, cols // Q8_BLOCK, Q8_BLOCK).astype(np.float32)
+    d = (np.abs(blocks).max(axis=-1) / np.float32(127.0)).astype(np.float32)
+    inv = np.divide(np.float32(1.0), d, out=np.zeros_like(d), where=d > 0)
+    q = np.rint(blocks * inv[..., None]).astype(np.int8)
+    return q.reshape(rows, cols), d
+
+
+def tile(arr, cols_per_tile):
+    """Interleave groups of 4 rows into [row group][column chunk][4 rows x chunk] tiles, so a kernel
+    computing 4 rows at once reads one sequential stream. Rows are zero-padded to a multiple of 4."""
+    rows, cols = arr.shape
+    pad = (-rows) % TILE_ROWS
+    if pad:
+        arr = np.concatenate([arr, np.zeros((pad, cols), dtype=arr.dtype)])
+    g = arr.shape[0] // TILE_ROWS
+    return arr.reshape(g, TILE_ROWS, cols // cols_per_tile, cols_per_tile).transpose(0, 2, 1, 3).copy()
 
 _DTYPES = {"F32": np.float32, "F16": np.float16, "BF16": np.uint16}
 
@@ -78,9 +116,24 @@ class SafeTensors:
 
 
 def main():
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    q8 = False
+    if "--quant" in args:
+        i = args.index("--quant")
+        if args[i + 1] not in ("int8", "fp32"):
+            sys.exit("--quant must be int8 or fp32")
+        q8 = args[i + 1] == "int8"
+        del args[i:i + 2]
+    tiled = False
+    if "--layout" in args:
+        i = args.index("--layout")
+        if args[i + 1] not in ("tiled", "rowmajor"):
+            sys.exit("--layout must be tiled or rowmajor")
+        tiled = args[i + 1] == "tiled"
+        del args[i:i + 2]
+    if len(args) != 2:
         sys.exit(__doc__)
-    model_dir, out_path = Path(sys.argv[1]), Path(sys.argv[2])
+    model_dir, out_path = Path(args[0]), Path(args[1])
     cfg = json.loads((model_dir / "config.json").read_text())
     st = SafeTensors(model_dir)
 
@@ -99,7 +152,7 @@ def main():
     if cfg.get("rope_scaling"):
         print(f"warning: rope_scaling {cfg['rope_scaling']} is ignored by this engine")
 
-    flags = (FLAG_TIED if tied else 0) | (FLAG_QKV_BIAS if has_bias else 0)
+    flags = (FLAG_TIED if tied else 0) | (FLAG_QKV_BIAS if has_bias else 0) | (FLAG_Q8 if q8 else 0) | (FLAG_TILED if tiled else 0)
     header = struct.pack("<II9iff", MAGIC, VERSION, dim, hidden, n_layers, n_heads, n_kv,
                          vocab, max_seq, head_dim, flags, theta, eps)
     header += b"\0" * (HEADER_BYTES - len(header))
@@ -120,14 +173,27 @@ def main():
     total = 0
     with open(out_path, "wb") as out:
         out.write(header)
+        def write(arr):
+            out.write(b"\0" * ((-out.tell()) % ALIGN))
+            out.write(np.ascontiguousarray(arr).tobytes())
+
         for name in order:
-            pad = (-out.tell()) % ALIGN
-            out.write(b"\0" * pad)
-            t = np.ascontiguousarray(st.get(name), dtype="<f4")
-            out.write(t.tobytes())
+            t = st.get(name)
             total += t.size
+            is_matrix = name.endswith(MATRIX_SUFFIXES)
+            if is_matrix and q8:
+                q, d = quantize_q8(t)
+                if tiled:  # values: 4 rows x 32 per block; scales: 4 per block
+                    q, d = tile(q, Q8_BLOCK), tile(d, 1)
+                write(q)
+                write(d.astype("<f4"))
+            elif is_matrix and tiled:
+                write(tile(t.astype("<f4"), TILE_COLS_F32))
+            else:
+                write(t.astype("<f4"))
     print(f"wrote {out_path}: {n_layers} layers, dim {dim}, heads {n_heads}/{n_kv}, vocab {vocab}, "
-          f"{total / 1e6:.1f}M params, tied={tied}, qkv_bias={has_bias}")
+          f"{total / 1e6:.1f}M params, tied={tied}, qkv_bias={has_bias}, {'int8' if q8 else 'fp32'}{', tiled' if tiled else ''} "
+          f"({out_path.stat().st_size / 1e6:.0f} MB)")
 
 
 if __name__ == "__main__":

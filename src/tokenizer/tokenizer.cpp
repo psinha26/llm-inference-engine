@@ -201,6 +201,10 @@ Tokenizer::Tokenizer(const std::string& path) {
         auto it = std::find_if(added_.begin(), added_.end(), [&](const AddedToken& a) { return a.content == name; });
         if (it != added_.end()) { eos_id_ = it->id; break; }
     }
+    for (const char* name : {"<|im_end|>", "<|eot_id|>", "<|end|>"}) {
+        auto it = std::find_if(added_.begin(), added_.end(), [&](const AddedToken& a) { return a.content == name; });
+        if (it != added_.end()) { eot_id_ = it->id; break; }
+    }
     for (const char* name : {"<|begin_of_text|>", "<s>", "<|im_start|>"}) {
         auto it = std::find_if(added_.begin(), added_.end(), [&](const AddedToken& a) { return a.content == name; });
         if (it != added_.end()) { bos_id_ = it->id; break; }

@@ -1,0 +1,180 @@
+{
+  "machine": {
+    "cpu": "aarch64",
+    "cores": 4,
+    "ram": "4 GB",
+    "os": "Linux 6.8.0-138-generic"
+  },
+  "prompt_tokens": 8,
+  "generated_tokens": 16,
+  "threads": 4,
+  "ladder": [
+    {
+      "name": "0. Naive: fp32, 1 thread, no KV cache",
+      "runs": 3,
+      "prefill": 2.64,
+      "decode": 0.17,
+      "decode_runs": [
+        0.16,
+        0.17,
+        0.17
+      ],
+      "peak_mb": 1385
+    },
+    {
+      "name": "1. + KV cache",
+      "runs": 5,
+      "prefill": 2.47,
+      "decode": 2.39,
+      "decode_runs": [
+        2.35,
+        2.46,
+        2.39,
+        2.31,
+        2.46
+      ],
+      "peak_mb": 1385
+    },
+    {
+      "name": "2. + thread pool (4 threads)",
+      "runs": 5,
+      "prefill": 7.87,
+      "decode": 7.46,
+      "decode_runs": [
+        7.46,
+        7.58,
+        6.96,
+        8.24,
+        6.73
+      ],
+      "peak_mb": 1385
+    },
+    {
+      "name": "3. + SIMD (NEON)",
+      "runs": 5,
+      "prefill": 46.3,
+      "decode": 42.44,
+      "decode_runs": [
+        38.45,
+        42.43,
+        42.68,
+        42.71,
+        42.44
+      ],
+      "peak_mb": 1385
+    },
+    {
+      "name": "4. + tiled weight layout",
+      "runs": 5,
+      "prefill": 44.44,
+      "decode": 38.83,
+      "decode_runs": [
+        25.01,
+        38.11,
+        39.56,
+        38.83,
+        40.39
+      ],
+      "peak_mb": 1385
+    },
+    {
+      "name": "5. + int8 weights",
+      "runs": 5,
+      "prefill": 137.61,
+      "decode": 124.85,
+      "decode_runs": [
+        132.17,
+        124.85,
+        124.36,
+        125.51,
+        118.95
+      ],
+      "peak_mb": 393
+    }
+  ],
+  "scaling": {
+    "int8": [
+      {
+        "threads": 1,
+        "prefill": 95.39,
+        "decode": 95.93,
+        "decode_runs": [
+          109.96,
+          93.94,
+          100.27,
+          95.07,
+          95.93
+        ],
+        "peak_mb": 393
+      },
+      {
+        "threads": 2,
+        "prefill": 124.42,
+        "decode": 115.47,
+        "decode_runs": [
+          111.4,
+          125.95,
+          79.32,
+          124.49,
+          115.47
+        ],
+        "peak_mb": 393
+      },
+      {
+        "threads": 4,
+        "prefill": 137.61,
+        "decode": 124.85,
+        "decode_runs": [
+          132.17,
+          124.85,
+          124.36,
+          125.51,
+          118.95
+        ],
+        "peak_mb": 393
+      }
+    ],
+    "fp32": [
+      {
+        "threads": 1,
+        "prefill": 31.97,
+        "decode": 31.37,
+        "decode_runs": [
+          30.71,
+          32.53,
+          31.37,
+          31.0,
+          32.46
+        ],
+        "peak_mb": 1385
+      },
+      {
+        "threads": 2,
+        "prefill": 42.6,
+        "decode": 38.74,
+        "decode_runs": [
+          34.71,
+          36.17,
+          40.46,
+          40.94,
+          38.74
+        ],
+        "peak_mb": 1385
+      },
+      {
+        "threads": 4,
+        "prefill": 44.44,
+        "decode": 38.83,
+        "decode_runs": [
+          25.01,
+          38.11,
+          39.56,
+          38.83,
+          40.39
+        ],
+        "peak_mb": 1385
+      }
+    ]
+  },
+  "llama_cpp_q8_0": null
+}

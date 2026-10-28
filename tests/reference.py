@@ -14,7 +14,18 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from convert import SafeTensors  # noqa: E402  (shared reader; its correctness is checked by the logit match)
+from convert import SafeTensors, quantize_q8  # noqa: E402  (shared reader; checked by the logit match)
+
+Q8 = 32
+
+
+def fake_q8(x):
+    """Quantize-dequantize an activation exactly like the engine (per 32-value block, round half to even)."""
+    x = np.asarray(x, dtype=np.float32)
+    b = x.reshape(*x.shape[:-1], -1, Q8)
+    d = (np.abs(b).max(-1, keepdims=True) / np.float32(127.0)).astype(np.float32)
+    inv = np.divide(np.float32(1.0), d, out=np.zeros_like(d), where=d > 0)
+    return (np.rint(b * inv) * d).reshape(x.shape).astype(np.float64)
 
 
 def rmsnorm(x, w, eps):
@@ -33,10 +44,20 @@ def rope(x, theta):
     return x * cos + rot * sin
 
 
-def forward(model_dir, tokens):
+def forward(model_dir, tokens, q8=False):
+    """Logits for every position. With q8=True, simulate the engine's int8 path: weight matrices
+    are block-quantized as in convert.py and every matmul input is quantized per 32 values."""
     cfg = json.loads((Path(model_dir) / "config.json").read_text())
     st = SafeTensors(Path(model_dir))
-    g = lambda n: st.get(n).astype(np.float64)
+
+    def g(n):
+        w = st.get(n)
+        if q8 and w.ndim == 2:
+            q, d = quantize_q8(w)
+            return (q.reshape(w.shape[0], -1, Q8) * d[..., None]).reshape(w.shape).astype(np.float64)
+        return w.astype(np.float64)
+
+    act = fake_q8 if q8 else (lambda a: a)  # matmul inputs
     D, nh = cfg["hidden_size"], cfg["num_attention_heads"]
     nkv = cfg.get("num_key_value_heads", nh)
     hd = cfg.get("head_dim") or D // nh
@@ -48,7 +69,7 @@ def forward(model_dir, tokens):
     for i in range(cfg["num_hidden_layers"]):
         p = f"model.layers.{i}."
         h = rmsnorm(x, g(p + "input_layernorm.weight"), eps)
-        q, k, v = (h @ g(p + f"self_attn.{n}_proj.weight").T for n in "qkv")
+        q, k, v = (act(h) @ g(p + f"self_attn.{n}_proj.weight").T for n in "qkv")
         if p + "self_attn.q_proj.bias" in st:
             q, k, v = (t + g(p + f"self_attn.{n}_proj.bias") for t, n in zip((q, k, v), "qkv"))
         q = rope(q.reshape(T, nh, hd).transpose(1, 0, 2), theta)
@@ -60,14 +81,14 @@ def forward(model_dir, tokens):
         s = np.exp(s - s.max(-1, keepdims=True))
         s /= s.sum(-1, keepdims=True)
         o = (s @ v).transpose(1, 0, 2).reshape(T, nh * hd)
-        x = x + o @ g(p + "self_attn.o_proj.weight").T
+        x = x + act(o) @ g(p + "self_attn.o_proj.weight").T
         h = rmsnorm(x, g(p + "post_attention_layernorm.weight"), eps)
-        gate = h @ g(p + "mlp.gate_proj.weight").T
-        up = h @ g(p + "mlp.up_proj.weight").T
-        x = x + (gate / (1 + np.exp(-gate)) * up) @ g(p + "mlp.down_proj.weight").T
+        gate = act(h) @ g(p + "mlp.gate_proj.weight").T
+        up = act(h) @ g(p + "mlp.up_proj.weight").T
+        x = x + act(gate / (1 + np.exp(-gate)) * up) @ g(p + "mlp.down_proj.weight").T
     x = rmsnorm(x, g("model.norm.weight"), eps)
     head = g("lm_head.weight") if "lm_head.weight" in st else g("model.embed_tokens.weight")
-    return x @ head.T  # [T, vocab]
+    return act(x) @ head.T  # [T, vocab]
 
 
 def greedy(model_dir, tokens, n):

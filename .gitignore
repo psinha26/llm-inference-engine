@@ -4,3 +4,4 @@ models/
 __pycache__/
 *.bin
 !tests/data/*.bin
+bench/results/*.cache.json
