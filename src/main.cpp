@@ -28,6 +28,7 @@ struct Args {
     std::string perplexity;   // evaluate perplexity on this text file instead of generating
     std::string kernel = "blocked";
     int ppl_tokens = 0;       // max tokens to score in perplexity mode (0 = all)
+    int ppl_start = 0;        // skip this many tokens first (to evaluate a long file in pieces)
     int max_tokens = 256;
     int threads = 1;
     int ctx = 0;  // 0 = prompt + max_tokens
@@ -59,7 +60,8 @@ void usage() {
         "  --quiet            don't stream generated text\n"
         "  --no-mmap          read weights into (huge-page) memory instead of mmap\n"
         "  --perplexity F     score text file F (chunks of --ctx tokens, default 512)\n"
-        "  --ppl-tokens N     score at most N tokens in perplexity mode\n");
+        "  --ppl-tokens N     score at most N tokens in perplexity mode\n"
+        "  --ppl-start N      skip the first N tokens of the file (split long evaluations)\n");
     std::exit(1);
 }
 
@@ -92,6 +94,7 @@ Args parse_args(int argc, char** argv) {
         else if (k == "--kernel") a.kernel = val();
         else if (k == "--perplexity") a.perplexity = val();
         else if (k == "--ppl-tokens") a.ppl_tokens = std::stoi(val());
+        else if (k == "--ppl-start") a.ppl_start = std::stoi(val());
         else usage();
     }
     if (a.model.empty() || (a.prompt.empty() && a.tokens.empty() && a.perplexity.empty())) usage();
@@ -138,6 +141,7 @@ int run_perplexity(Model& model, const Tokenizer& tok, const Args& args) {
     std::stringstream ss;
     ss << f.rdbuf();
     std::vector<int> ids = tok.encode(ss.str(), /*allow_special=*/false);
+    ids.erase(ids.begin(), ids.begin() + std::min<size_t>(ids.size(), size_t(std::max(0, args.ppl_start))));
     if (args.ppl_tokens > 0 && int(ids.size()) > args.ppl_tokens) ids.resize(args.ppl_tokens);
     const int ctx = model.ctx_len(), V = model.config().vocab_size;
     double nll = 0.0;
@@ -156,8 +160,8 @@ int run_perplexity(Model& model, const Tokenizer& tok, const Args& args) {
         std::fprintf(stderr, "\r  scored %ld tokens, running ppl %.4f", scored, std::exp(nll / scored));
     }
     std::fprintf(stderr, "\n");
-    std::printf("perplexity %.4f over %ld tokens (ctx %d) in %.1fs\n", std::exp(nll / scored), scored, ctx,
-                now_s() - t0);
+    std::printf("perplexity %.4f over %ld tokens (ctx %d, nll_sum %.6f) in %.1fs\n", std::exp(nll / scored), scored,
+                ctx, nll, now_s() - t0);
     return 0;
 }
 

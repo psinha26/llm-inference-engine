@@ -3,34 +3,33 @@
 This is the companion to the README for you, Parth. The README is for recruiters; this is for
 you to learn the code well enough to defend every line of it in an interview.
 
-## 1. Finish the last steps (≈ 1 hour, mostly waiting)
+## 1. What's left to do
 
-Your Mac's disk was full when this was built. Free ~4 GB first.
+Everything has been built, verified against Hugging Face and benchmarked on your Mac (in its
+Linux VM). The model files are already in `models/` (gitignored). What remains is yours:
 
-```bash
-cd ~/Parth/Projects/llm-inference-engine
-xcode-select --install                    # once, if `clang++ --version` fails
-./scripts/setup.sh                        # download model + WikiText-2, convert, build
-./scripts/verify.sh                       # real model vs Hugging Face + perplexity -> bench/results/verification.md
-BENCH=1 ./scripts/setup.sh                # adds model-tiled.bin for the benchmark
-.venv/bin/pip install matplotlib
-.venv/bin/python bench/run_bench.py --model-dir models/SmolLM2-360M --machine macbook-air
-```
+1. **Put it under git and on GitHub.** The copy in `~/Parth/Projects/llm-inference-engine` has
+   no `.git` folder; the zip from the chat has the full history. Either unzip it over this folder,
+   or `git init && git add -A && git commit -m "LLM inference engine"`. Then create a public repo
+   and push.
+2. **Add CI.** Copy `.github/workflows/ci.yml` from the zip (the file bridge couldn't write into
+   `.github/`). It runs the unit tests, tokenizer check and random-model tests on Linux and macOS.
+3. **Native macOS benchmark (optional, better numbers).** The table is from a 4-vCPU Linux VM. On
+   macOS directly (8 cores, no VM):
+   ```bash
+   xcode-select --install          # once, if `clang++ --version` fails
+   ./scripts/setup.sh              # skips the download, builds natively
+   .venv/bin/pip install matplotlib
+   .venv/bin/python bench/run_bench.py --model-dir models/SmolLM2-360M --machine macbook-air-native
+   ```
+   then point the README's table and chart links at `bench/results/macbook-air-native*`.
+4. **Record the demo GIF** (section 7) and put it at the top of the README.
+5. **Delete leftovers** you don't need: `~/Downloads/model.safetensors` (a copy is in `models/`)
+   and `~/Downloads/wikitext-2-raw-v1.zip`.
 
-Then:
-
-1. Copy `.github/workflows/ci.yml` from the zip into the repo (the file-copy bridge couldn't write
-   into `.github/`). It runs the unit tests, tokenizer check and random-model tests on every push.
-2. Replace the VM numbers in the README's headline table and chart links with
-   `bench/results/macbook-air.md` and its PNGs (native macOS, real weights).
-3. Add the perplexity and HF-match rows from `bench/results/verification.md` to the README's
-   Correctness table.
-4. `git add -A && git commit` and push to a public GitHub repo.
-
-If `verify.sh` reports a greedy mismatch on a prompt after many matching tokens, look at whether
-the two top logits were nearly tied at that step. fp32 summation order differs between any two
-implementations, so a near-tie can flip. Say so honestly rather than hiding it; a mismatch at
-token 1 would be a real bug.
+If you ever re-run `verify.sh` and a greedy comparison diverges after many matching tokens,
+check whether the two top logits were nearly tied at that step. fp32 summation order differs
+between any two implementations, so a near-tie can flip. A mismatch at token 1 would be a bug.
 
 ## 2. Reading order
 
@@ -136,18 +135,20 @@ claim an effect smaller than the noise.
 
 ## 6. Resume bullets
 
-Fill the bracketed numbers from `verification.md` and your native benchmark. Until then, the VM
-numbers are real measurements on your Mac:
+All numbers measured (see `bench/results/verification.md` and `macbook-air-vm-smollm2.md`):
 
 - Built a dependency-free C++17 inference engine for SmolLM2-360M with a custom BPE tokenizer and
-  Llama transformer forward pass, matching Hugging Face output token-for-token [verify.sh]
-- Reached 125 tokens/sec decode, 52× a scalar single-threaded baseline, via KV caching, a custom
-  `std::thread` pool, NEON SIMD kernels and a tiled weight layout (19 → 55 GB/s streaming from DRAM for the 4-row kernel)
+  Llama transformer forward pass, matching Hugging Face output token-for-token (20/20 prompts,
+  100 tokens each)
+- Reached 117 tokens/sec decode, 49× a scalar single-threaded baseline, via KV caching, a custom
+  `std::thread` pool, NEON SIMD kernels and a tiled weight layout (19 → 55 GB/s streaming from
+  DRAM for the 4-row kernel)
 - Cut model memory 3.5× (1,385 → 393 MB) with block-wise int8 quantization (SDOT dot products) at
-  [P]% perplexity increase on WikiText-2; added an OpenAI-compatible streaming HTTP server
+  a 0.66% WikiText-2 perplexity increase; added an OpenAI-compatible streaming HTTP server
 
-Use "52× a scalar baseline", not "734×": the 734× includes the no-KV-cache baseline, whose cost
-depends on sequence length, and an interviewer may push on it.
+Use "49× a scalar baseline", not "689×": the 689× includes the no-KV-cache baseline, whose cost
+depends on sequence length, and an interviewer may push on it. If you re-benchmark natively,
+update the numbers.
 
 ## 7. Recording the demo
 

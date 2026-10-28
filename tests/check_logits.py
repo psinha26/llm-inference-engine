@@ -6,7 +6,7 @@ For each of 20 fixed prompts:
   - greedy decoding must match token-for-token for 100 tokens
 
   pip install torch transformers
-  python3 tests/check_logits.py build/engine models/SmolLM2-360M
+  python3 tests/check_logits.py build/engine models/SmolLM2-360M [extra engine flags, e.g. --threads 4]
 
 HF results are cached in <model_dir>/hf_reference.npz so reruns only run the engine.
 """
@@ -43,43 +43,40 @@ N_GEN = 100
 
 
 def hf_reference(model_dir: Path):
-    cache = model_dir / "hf_reference.npz"
-    if cache.exists():
-        z = np.load(cache, allow_pickle=True)
-        return list(z["prompt_ids"]), list(z["logits"]), list(z["greedy"])
-    import torch
-    from tokenizers import Tokenizer
-    from transformers import AutoModelForCausalLM
+    """HF logits + greedy tokens per prompt, cached one file per prompt in <model_dir>/hf_reference/
+    so an interrupted run resumes."""
+    cache = model_dir / "hf_reference"
+    cache.mkdir(exist_ok=True)
+    todo = [i for i in range(len(PROMPTS)) if not (cache / f"{i}.npz").exists()]
+    if todo:
+        import torch
+        from tokenizers import Tokenizer
+        from transformers import AutoModelForCausalLM
 
-    # Tokenize with the `tokenizers` library straight from tokenizer.json (AutoTokenizer would need
-    # tokenizer_config.json, and guessing its class can silently add a BOS token).
-    tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
-    model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float32).eval()
-    prompt_ids, logits, greedy = [], [], []
-    with torch.no_grad():
-        for i, p in enumerate(PROMPTS):
-            ids = torch.tensor([tok.encode(p).ids])
-            res = model(ids, use_cache=True)
-            out = res.logits[0, -1].numpy()
-            # Plain greedy loop with HF's KV cache (no generate() heuristics; end-of-text allowed).
-            gen, past, logit = ids[0].tolist(), res.past_key_values, res.logits[0, -1]
-            for _ in range(N_GEN):
-                nxt = int(logit.argmax())
-                gen.append(nxt)
-                res = model(torch.tensor([[nxt]]), past_key_values=past, use_cache=True)
-                past, logit = res.past_key_values, res.logits[0, -1]
-            prompt_ids.append(ids[0].tolist())
-            logits.append(out)
-            greedy.append(gen)
-            print(f"  hf reference {i + 1}/{len(PROMPTS)}", end="\r", flush=True)
-    print()
-    np.savez(cache, prompt_ids=np.array(prompt_ids, dtype=object), logits=np.array(logits),
-             greedy=np.array(greedy, dtype=object))
-    return prompt_ids, logits, greedy
+        # Tokenize with the `tokenizers` library straight from tokenizer.json (AutoTokenizer would need
+        # tokenizer_config.json, and guessing its class can silently add a BOS token).
+        tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+        model = AutoModelForCausalLM.from_pretrained(model_dir, torch_dtype=torch.float32).eval()
+        with torch.no_grad():
+            for i in todo:
+                ids = torch.tensor([tok.encode(PROMPTS[i]).ids])
+                res = model(ids, use_cache=True)
+                out = res.logits[0, -1].numpy()
+                # Plain greedy loop with HF's KV cache (no generate() heuristics; end-of-text allowed).
+                gen, past, logit = ids[0].tolist(), res.past_key_values, res.logits[0, -1]
+                for _ in range(N_GEN):
+                    nxt = int(logit.argmax())
+                    gen.append(nxt)
+                    res = model(torch.tensor([[nxt]]), past_key_values=past, use_cache=True)
+                    past, logit = res.past_key_values, res.logits[0, -1]
+                np.savez(cache / f"{i}.npz", prompt_ids=np.array(ids[0].tolist()), logits=out, greedy=np.array(gen))
+                print(f"  hf reference {i + 1}/{len(PROMPTS)}", flush=True)
+    z = [np.load(cache / f"{i}.npz") for i in range(len(PROMPTS))]
+    return [list(x["prompt_ids"]) for x in z], [x["logits"] for x in z], [list(x["greedy"]) for x in z]
 
 
 def main():
-    engine, model_dir = sys.argv[1], Path(sys.argv[2])
+    engine, model_dir, extra = sys.argv[1], Path(sys.argv[2]), sys.argv[3:]
     prompt_ids, ref_logits, ref_greedy = hf_reference(model_dir)
     worst, failures = 0.0, 0
     with tempfile.TemporaryDirectory() as td:
@@ -87,7 +84,7 @@ def main():
             lf, idf = Path(td) / "l.bin", Path(td) / "ids.txt"
             subprocess.run([engine, "--model", model_dir / "model.bin", "--tokenizer", model_dir / "tokenizer.json",
                             "--prompt", p, "--max-tokens", str(N_GEN), "--ignore-eos", "--quiet",
-                            "--dump-logits", lf, "--ids-out", idf], check=True, capture_output=True)
+                            "--dump-logits", lf, "--ids-out", idf, *extra], check=True, capture_output=True)
             logits = np.fromfile(lf, dtype=np.float32)
             ids = [int(x) for x in idf.read_text().split()]
             n_prompt = len(prompt_ids[i])

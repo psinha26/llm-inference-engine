@@ -8,41 +8,45 @@ int8 quantization and an OpenAI-compatible server. No PyTorch, ggml or BLAS insi
 
 ## Headline numbers
 
-SmolLM2-360M, decode speed (batch 1), MacBook Air (Apple Silicon), median of 5 runs:
+SmolLM2-360M, batch-1 decode on a MacBook Air (Apple Silicon), median of 5 runs:
 
-| | Decode | Peak memory |
-|---|---|---|
-| Scalar baseline (fp32, 1 thread, KV cache) | 2.4 tok/s | 1,385 MB |
-| **This engine (int8, NEON, 4 threads)** | **124.8 tok/s (52×)** | **393 MB (3.5× less)** |
+| | Decode | Peak memory | WikiText-2 perplexity |
+|---|---|---|---|
+| Scalar baseline (fp32, 1 thread, KV cache) | 2.4 tok/s | 1,385 MB | 18.44 |
+| **This engine (int8, NEON, 4 threads)** | **117 tok/s (49×)** | **393 MB (3.5× less)** | **18.57 (+0.66%)** |
+
+Output matches Hugging Face `transformers` token-for-token: 20/20 prompts × 100 greedy tokens,
+worst logit difference 2e-4 ([verification](bench/results/verification.md)).
 
 | Step | Decode tok/s | Speedup vs step 0 | Peak memory |
 |---|---|---|---|
 | 0. Naive: fp32, 1 thread, scalar loops, no KV cache | 0.17 | 1× | 1,385 MB |
 | 1. + KV cache | 2.4 | 14× | 1,385 MB |
-| 2. + thread pool (4 threads) | 7.5 | 44× | 1,385 MB |
-| 3. + NEON SIMD kernels | 42.4 | 250× | 1,385 MB |
-| 4. + tiled weight layout | 38.8 | 228× | 1,385 MB |
-| 5. + int8 weights (32-value blocks) | **124.8** | **734×** | **393 MB** |
+| 2. + thread pool (4 threads) | 8.8 | 52× | 1,385 MB |
+| 3. + NEON SIMD kernels | 36.7 | 216× | 1,385 MB |
+| 4. + tiled weight layout | 34.2 | 201× | 1,385 MB |
+| 5. + int8 weights (32-value blocks) | **117.1** | **689×** | **393 MB** |
 
-![Speedup ladder](bench/results/macbook-air-linux-vm-ladder.png)
+![Speedup ladder](bench/results/macbook-air-vm-smollm2-ladder.png)
 
-![Thread scaling](bench/results/macbook-air-linux-vm-threads.png)
+![Thread scaling](bench/results/macbook-air-vm-smollm2-threads.png)
 
 How to read these honestly:
 
 - **Step 0's gap depends on sequence length.** Without a KV cache every token recomputes the whole
   sequence, so the 14× from step 1 is for this 24-token run and grows with length. The fair
-  "kernel + systems" speedup is step 1 → step 5: **52×**.
+  "kernel + systems" speedup is step 1 → step 5: **49×**.
 - **Step 4 looks like a regression at 4 threads, and isn't.** At 4 threads fp32 decode is capped
-  by memory bandwidth (~55 GB/s here), so layout can't help. At 1 thread, where it can, tiling is
-  +18% end to end (30.4 → 35.8 tok/s), and in the kernel microbenchmark it is the difference between 19 and 55 GB/s
-  (see [What I learned](#what-i-learned)).
-- **Where these were measured:** a 4-vCPU Linux VM on the MacBook Air, with random weights that
-  have SmolLM2-360M's exact shapes (`bench/make_shaped_model.py`). Speed depends only on shapes.
-  Native macOS numbers on the real weights come from `bench/run_bench.py`; see
-  [Benchmarking](#benchmarking).
+  by memory bandwidth (~50-55 GB/s here), so layout can't help, and the difference is within run
+  noise. At 1 thread, where it can, tiling is +18% end to end (30.4 → 35.8 tok/s), and in the
+  kernel microbenchmark it is the difference between 19 and 55 GB/s (see
+  [What I learned](#what-i-learned)).
+- **Where these were measured:** the real SmolLM2-360M weights, in a 4-vCPU Linux VM on the
+  MacBook Air. Native macOS (8 cores) should do better; `bench/run_bench.py` reproduces the table
+  on any machine (see [Benchmarking](#benchmarking)). Only decode is reported: prefill here
+  includes paging the weights in from the host's shared folder.
 
-Raw data: [`bench/results/macbook-air-linux-vm.json`](bench/results/macbook-air-linux-vm.json).
+Raw data: [`bench/results/macbook-air-vm-smollm2.json`](bench/results/macbook-air-vm-smollm2.json).
 
 ## Quick start
 
@@ -126,8 +130,9 @@ GB/s that caps fp32 at ~38 tok/s, which is where steps 3-4 land. int8 blocks (1 
 | Tokenizer, 1,256 strings (emoji, CJK, code, digits, specials) | HF `tokenizers` | 1256/1256 exact |
 | Forward pass, every kernel × 1/3 threads × row-major/tiled, random GQA and QKV-bias models | independent NumPy implementation | max logit diff < 1e-4, greedy identical (118 checks) |
 | int8 path | NumPy simulation of the same int8 arithmetic | max logit diff < 1e-5 |
-| Real SmolLM2-360M, 20 prompts | HF `transformers` fp32 | run `scripts/verify.sh` |
-| WikiText-2 perplexity, fp32 vs int8 | | run `scripts/verify.sh` |
+| Real SmolLM2-360M tokenizer, same 1,256 strings | HF `tokenizers` | 1256/1256 exact |
+| Real SmolLM2-360M, 20 prompts: final logits + 100 greedy tokens | HF `transformers` fp32 | 20/20 token-for-token, worst logit diff 2.0e-4 |
+| WikiText-2 perplexity (8,176 tokens, 512-token windows) | fp32 vs int8 | 18.44 vs 18.57 (+0.66%) |
 
 ```bash
 python3 tests/test_random_models.py build/engine     # no download needed (also runs in CI)
@@ -150,8 +155,8 @@ model and quantization, convert with llama.cpp's `convert_hf_to_gguf.py --outtyp
 
 ## What I learned
 
-- **Batch-1 decode is a memory-bandwidth problem.** One core with NEON already pulls ~45 GB/s.
-  Threads gave 3.1× on the compute-bound scalar kernel but only ~1.2× once SIMD made it memory
+- **Batch-1 decode is a memory-bandwidth problem.** One core with NEON already pulls ~42 GB/s (29 tok/s × 1.45 GB).
+  Threads gave 3.7× on the compute-bound scalar kernel but only ~1.2× once SIMD made it memory
   bound. The big remaining win was moving fewer bytes (int8), not doing faster math.
 - **A "faster" kernel can be slower out of cache.** Computing 4 rows at a time reuses each x
   load 4 times and won in cache (62 vs 56 GB/s), but streaming fp32 from DRAM it fell to 19 GB/s:
@@ -161,7 +166,8 @@ model and quantization, convert with llama.cpp's `convert_hf_to_gguf.py --outtyp
 - **Spin counts don't port.** The thread pool first spun 20,000 iterations before sleeping. On
   Apple Silicon that's a few microseconds, shorter than the serial work between parallel
   regions, so workers slept between every matmul and 4 threads were slower than 1. Spinning for
-  a fixed *time* (500 µs) fixed it: int8 went from 86 to 125 tok/s at 4 threads.
+  a fixed *time* (500 µs) fixed it: int8 went from 87 to 125 tok/s at 4 threads (random-weight
+  run; same shapes, same speed).
 - **Testing int8 exactly needs care with ties.** Comparing against a NumPy int8 simulation
   failed by up to 1.0 logit on bf16 test weights. Cause: bf16 weights × int8-dequantized
   embeddings land exactly on .5 rounding boundaries, and two implementations break those ties
