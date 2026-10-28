@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy tokenizers
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENGINE_BUILD_TESTS=ON
+          cmake --build build -j
+      - name: Op unit tests (vs NumPy)
+        run: ctest --test-dir build --output-on-failure
+      - name: Tokenizer vs Hugging Face (1,200+ strings)
+        run: |
+          python tests/make_test_tokenizer.py /tmp/tokenizer.json
+          python tests/check_tokenizer.py build/tokenize /tmp/tokenizer.json
+      - name: End-to-end vs NumPy reference on random models
+        run: python tests/test_random_models.py build/engine

@@ -1,0 +1,6 @@
+build/
+models/
+.venv/
+__pycache__/
+*.bin
+!tests/data/*.bin
